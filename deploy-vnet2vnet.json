@@ -1,0 +1,399 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "adminPassword": {
+            "type": "securestring",
+            "metadata": {
+                "description": "VM Administrator password"
+            }
+        },
+        "vmCount": {
+            "type": "int",
+            "metadata": {
+                "description": "# of VMs"
+            },
+            "defaultValue": 3
+        },
+        "deployIIS": {
+            "type": "bool",
+            "defaultValue": false
+        }
+
+    },
+    "variables": {
+        "baseNames": [
+            "spokeA",
+            "hub",
+            "spokeB"
+        ],
+        "zones": [
+            "1",
+            "2",
+            "3"
+        ],
+        "adminUserName": "student",
+        "rtrPrefix": "router-",
+        "spokeNames":["spokeA","spokeB"]
+    },
+    "resources": [
+        {
+            "name": "[concat(variables('baseNames')[copyindex()],'-pip')]",
+            "type": "Microsoft.Network/publicIPAddresses",
+            "apiVersion": "2018-08-01",
+            "location": "[resourceGroup().location]",
+            "sku": {
+                "name": "Standard"
+            },
+            "copy": {
+                "name": "pipCopy",
+                "count": "[parameters('vmCount')]"
+            },
+            "tags": {
+                "displayName": "Public IP Address"
+            },
+            "properties": {
+                "publicIPAllocationMethod": "Static"
+            }
+        },
+        {
+            "name": "[concat(variables('baseNames')[copyindex()],'-vnet')]",
+            "type": "Microsoft.Network/virtualNetworks",
+            "apiVersion": "2018-08-01",
+            "location": "[resourceGroup().location]",
+            "dependsOn": [
+                "nsgCopy"
+            ],
+            "copy": {
+                "name": "vnetCopy",
+                "count": "[parameters('vmCount')]"
+            },
+            "tags": {
+                "displayName": "Virtual Network"
+            },
+            "properties": {
+                "addressSpace": {
+                    "addressPrefixes": [
+                        "[concat('10.',copyindex(),'.0.0/16')]"
+                    ]
+                },
+                "subnets": [
+                    {
+                        "name": "default",
+                        "properties": {
+                            "addressPrefix": "[concat('10.',copyindex(),'.0.0/24')]",
+                            "networkSecurityGroup": {
+                                "id": "[resourceId('Microsoft.Network/networkSecurityGroups',concat(variables('baseNames')[copyIndex()],'-nsg'))]"
+                            }
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "name": "[concat(variables('baseNames')[copyindex()],'-nic')]",
+            "type": "Microsoft.Network/networkInterfaces",
+            "apiVersion": "2018-08-01",
+            "location": "[resourceGroup().location]",
+            "copy": {
+                "name": "nicCopy",
+                "count": "[parameters('vmCount')]"
+            },
+            "dependsOn": [
+                "pipCopy",
+                "vnetCopy"
+            ],
+            "tags": {
+                "displayName": "vm Network Interface"
+            },
+            "properties": {
+                "ipConfigurations": [
+                    {
+                        "name": "ipConfig1",
+                        "properties": {
+                            "privateIPAllocationMethod": "Dynamic",
+                            "publicIPAddress": {
+                                "id": "[resourceId('Microsoft.Network/publicIPAddresses', concat(variables('baseNames')[copyindex()],'-PIP'))]"
+                            },
+                            "subnet": {
+                                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', concat(variables('baseNames')[copyindex()],'-VNET'), 'default')]"
+                            }
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "name": "[concat(variables('baseNames')[copyindex()],'-vm')]",
+            "type": "Microsoft.Compute/virtualMachines",
+            "apiVersion": "2019-03-01",
+            "location": "[resourceGroup().location]",
+            "copy": {
+                "name": "vmCopy",
+                "count": "[parameters('vmCount')]"
+            },
+            "dependsOn": [
+                "nicCopy"
+            ],
+            "tags": {
+                "displayName": "vm"
+            },
+            "zones": [
+                "[variables('zones')[copyindex()]]"
+            ],
+            "properties": {
+                "hardwareProfile": {
+                    "vmSize": "Standard_D2S_V3"
+                },
+                "osProfile": {
+                    "computerName": "[variables('baseNames')[copyindex()]]",
+                    "adminUsername": "[variables('adminUsername')]",
+                    "adminPassword": "[parameters('adminPassword')]"
+                },
+                "storageProfile": {
+                    "imageReference": {
+                        "publisher": "MicrosoftWindowsServer",
+                        "offer": "WindowsServer",
+                        "sku": "2016-Datacenter",
+                        "version": "latest"
+                    },
+                    "osDisk": {
+                        "name": "[concat(variables('baseNames')[copyindex()],'-OSDisk')]",
+                        "caching": "ReadWrite",
+                        "createOption": "FromImage"
+                    }
+                },
+                "networkProfile": {
+                    "networkInterfaces": [
+                        {
+                            "id": "[resourceId('Microsoft.Network/networkInterfaces', concat(variables('baseNames')[copyindex()],'-NIC'))]"
+                        }
+                    ]
+                },
+                "diagnosticsProfile": {
+                    "bootDiagnostics": {
+                        "enabled": false
+                    }
+                }
+            },
+            "resources": [
+                {
+                    "name": "Microsoft.Powershell.DSC",
+                    "type": "extensions",
+                    "apiVersion": "2019-03-01",
+                    "location": "[resourceGroup().location]",
+                    "condition": "[parameters('deployIIS')]",
+                    "tags": {
+                        "displayName": "IIS Installation"
+                    },
+                    "dependsOn": [
+                        "[resourceId('Microsoft.Compute/virtualMachines', concat(variables('baseNames')[copyindex()],'-VM'))]"
+                    ],
+                    "properties": {
+                        "publisher": "Microsoft.Powershell",
+                        "type": "DSC",
+                        "typeHandlerVersion": "2.9",
+                        "autoUpgradeMinorVersion": true,
+                        "settings": {
+                            "configuration": {
+                                "url": "https://inedemoassets.blob.core.windows.net/codedeploy/IISInstall.zip",
+                                "script": "IISInstall.ps1",
+                                "function": "Main"
+                            },
+                            "configurationArguments": {
+                                "nodeName": "[variables('baseNames')[copyindex()]]"
+                            }
+                        },
+                        "protectedSettings": {
+                        }
+                    }
+                }
+            ]
+        },
+        {
+            "type": "Microsoft.Network/networkSecurityGroups",
+            "apiVersion": "2019-02-01",
+            "name": "[concat(variables('baseNames')[copyIndex()],'-nsg')]",
+            "location": "eastus",
+            "copy": {
+                "name": "nsgCopy",
+                "count": "[parameters('vmCount')]"
+            },
+            "tags": {
+                "displayName": "NSG"
+            },
+            "properties": {
+                "securityRules": [
+                    {
+                        "name": "Standard",
+                        "properties": {
+                            "protocol": "TCP",
+                            "sourcePortRange": "*",
+                            "sourceAddressPrefix": "*",
+                            "destinationAddressPrefix": "*",
+                            "access": "Allow",
+                            "priority": 100,
+                            "direction": "Inbound",
+                            "sourcePortRanges": [
+                            ],
+                            "destinationPortRanges": [
+                                "80",
+                                "22",
+                                "3389"
+                            ],
+                            "sourceAddressPrefixes": [
+                            ],
+                            "destinationAddressPrefixes": [
+                            ]
+                        }
+                    }
+
+                ]
+            }
+        },
+
+
+        {
+            "type": "Microsoft.Network/networkInterfaces",
+            "apiVersion": "2019-08-01",
+            "name": "[concat(variables('rtrPrefix'),'nic')]",
+            "location": "eastus",
+            "tags": {
+                "displayName": "Router NIC"
+            },
+            "dependsOn": [
+                "[resourceId('Microsoft.Network/virtualNetworks', concat(variables('baseNames')[1],'-VNet'))]"
+            ],
+            "properties": {
+                "ipConfigurations": [
+                    {
+                        "name": "ipconfig1",
+                        "properties": {
+                            "privateIPAddress": "10.1.0.10",
+                            "privateIPAllocationMethod": "Static",
+                            "subnet": {
+                                "id": "[resourceId('Microsoft.Network/virtualNetworks/Subnets', concat(variables('baseNames')[1],'-VNet'),'default')]"
+                            },
+                            "primary": true,
+                            "privateIPAddressVersion": "IPv4"
+                        }
+                    }
+                ],
+                "dnsSettings": {
+                    "dnsServers": [
+                    ]
+                },
+                "enableAcceleratedNetworking": false,
+                "enableIPForwarding": true
+            }
+        },
+        {
+            "type": "Microsoft.Compute/virtualMachines",
+            "apiVersion": "2019-03-01",
+            "name": "[concat(variables('rtrPrefix'),'vm')]",
+            "location": "eastus",
+            "tags": {
+                "displayName": "Router VM"
+            },
+            "dependsOn": [
+                "[resourceId('Microsoft.Network/networkInterfaces', concat(variables('rtrPrefix'),'nic'))]"
+            ],
+            "plan": {
+                "name": "netgate-pfsense-plus",
+                "product": "netgate-pfsense-plus-fw-vpn-router",
+                "publisher": "netgate"
+            },
+            "properties": {
+                "hardwareProfile": {
+                    "vmSize": "Basic_A1"
+                },
+                "storageProfile": {
+                    "imageReference": {
+                        "publisher": "netgate",
+                        "offer": "netgate-pfsense-plus-fw-vpn-router",
+                        "sku": "netgate-pfsense-plus",
+                        "version": "21.05.0"
+                    },
+                    "osDisk": {
+                        "osType": "Linux",
+                        "name": "[concat(variables('rtrPrefix'),'osdisk')]",
+                        "createOption": "FromImage",
+                        "caching": "ReadWrite",
+                        "managedDisk": {
+                            "storageAccountType": "StandardSSD_LRS"
+                        },
+                        "diskSizeGB": 8
+                    },
+                    "dataDisks": [
+                    ]
+                },
+                "osProfile": {
+                    "computerName": "[concat(variables('rtrPrefix'))]",
+                    "adminUsername": "student",
+                    "adminPassword": "[concat(parameters('adminPassword'))]",
+                    "linuxConfiguration": {
+                        "disablePasswordAuthentication": false,
+                        "provisionVMAgent": true
+                    },
+                    "secrets": [
+                    ],
+                    "allowExtensionOperations": true
+                },
+                "networkProfile": {
+                    "networkInterfaces": [
+                        {
+                            "id": "[resourceId('Microsoft.Network/networkInterfaces', concat(variables('rtrPrefix'),'nic'))]"
+                        }
+                    ]
+                },
+                "diagnosticsProfile": {
+                    "bootDiagnostics": {
+                        "enabled": false
+                    }
+                }
+            }
+        },
+        {
+            "apiVersion": "2016-06-01",
+            "type": "Microsoft.Network/virtualNetworks/virtualNetworkPeerings",
+            "name": "[concat(variables('spokeNames')[copyIndex()],'-vnet/',variables('spokeNames')[copyIndex()],'2hub')]",
+            "location": "[resourceGroup().location]",
+            "copy":{
+                "name":"spokePeerCopy",
+                "Count":2
+            },
+            "dependsOn":["vnetCopy"],        
+            "properties": {
+                "allowVirtualNetworkAccess": true,
+                "allowForwardedTraffic": true,
+                "allowGatewayTransit": false,
+                "useRemoteGateways": false,
+                "remoteVirtualNetwork": {
+                    "id": "[resourceId('Microsoft.Network/virtualNetworks','hub-vnet')]"
+                }
+            }
+        },
+        {
+            "apiVersion": "2016-06-01",
+            "type": "Microsoft.Network/virtualNetworks/virtualNetworkPeerings",
+            "name": "[concat('hub-vnet/hub2',variables('spokeNames')[copyIndex()])]",
+            "location": "[resourceGroup().location]",
+            "copy":{
+                "name":"hubPeerCopy",
+                "Count":2
+            },
+            "dependsOn":["vnetCopy"],        
+            "properties": {
+                "allowVirtualNetworkAccess": true,
+                "allowForwardedTraffic": false,
+                "allowGatewayTransit": false,
+                "useRemoteGateways": false,
+                "remoteVirtualNetwork": {
+                    "id": "[resourceId('Microsoft.Network/virtualNetworks',concat(variables('spokeNames')[copyIndex()],'-vnet'))]"
+                }
+            }
+        }
+    ],
+    "outputs": {
+    }
+}
